@@ -1,0 +1,12 @@
+.env
+*.db
+__pycache__/
+*.py[cod]
+.Python
+venv/
+.venv/
+node_modules/
+frontend/dist/
+backend/monster_jobs.db
+.playwright_monster_profile/
+*.log
