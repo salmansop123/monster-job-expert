@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import random
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -69,8 +70,12 @@ DETAIL_SELECTORS: dict[str, list[str]] = {
     ],
     "description": [
         "[data-testid='jobDetailDescription']",
+        "[data-testid='jobDescription']",
+        "[data-automation='jobDescription']",
+        "section[class*='description']",
         ".job-description",
         "[class*='jobDescription']",
+        "[class*='JobDescription']",
         "#JobDescription",
         "[class*='description-content']",
     ],
@@ -190,6 +195,128 @@ async def extract_with_fallback(page: Page, selectors: list[str]) -> str:
     return ""
 
 
+async def extract_longest_inner_text(page: Page, selectors: list[str]) -> str:
+    """Prefer the longest non-empty match (Monster often has multiple partial nodes)."""
+    best = ""
+    for selector in selectors:
+        try:
+            elements = await page.query_selector_all(selector)
+            for el in elements:
+                text = (await el.inner_text()).strip()
+                if len(text) > len(best):
+                    best = text
+        except Exception:
+            continue
+    return best
+
+
+_BAD_WEBSITE_SNIPPETS = (
+    "onetrust",
+    "privacyportal",
+    "cookie",
+    "consent.",
+    "trustarc",
+    "privacy-choice",
+    "doubleclick",
+    "googleadservices",
+    "googlesyndication",
+    "facebook.com",
+    "twitter.com",
+    "t.co/",
+    "instagram.com",
+    "youtube.com",
+    "tiktok.com",
+    "addthis.com",
+    "linkedin.com/sharing",
+    "monster.com",
+    "indeed.com",
+    "glassdoor.com",
+    "apps.apple.com",
+    "itunes.apple.com",
+    "play.google.com",
+    "appstore",
+    "mailto:",
+    "tel:",
+)
+
+
+def _is_plausible_company_website(href: str | None) -> bool:
+    if not href:
+        return False
+    h = href.strip().lower()
+    if not h.startswith(("http://", "https://")):
+        return False
+    return not any(b in h for b in _BAD_WEBSITE_SNIPPETS)
+
+
+def _normalize_website_href(raw: str) -> str:
+    s = raw.strip()
+    if not s:
+        return ""
+    lower = s.lower()
+    if lower.startswith(("http://", "https://")):
+        return s
+    if lower.startswith("//"):
+        return "https:" + s
+    if " " in s:
+        return s
+    return "https://" + s.lstrip("/")
+
+
+def _sanitize_website_field(raw: str | None) -> str:
+    if not raw or not str(raw).strip():
+        return ""
+    norm = _normalize_website_href(str(raw).strip())
+    if norm and _is_plausible_company_website(norm):
+        return norm
+    return ""
+
+
+def _clean_job_description_text(text: str) -> str:
+    t = (text or "").strip()
+    if not t:
+        return ""
+    # Drop boilerplate header lines Monster injects outside the JD body.
+    drop_patterns = (
+        r"(?mi)^skip to content\s*$",
+        r"(?mi)^sign up\s*$",
+        r"(?mi)^log in\s*$",
+        r"(?mi)^find jobs\s*$",
+        r"(?mi)^salary tools\s*$",
+        r"(?mi)^career advice\s*$",
+        r"(?mi)^free resume templates\s*$",
+        r"(?mi)^employers\s*/\s*post job\s*$",
+        r"(?mi)^back to results\s*$",
+    )
+    for pat in drop_patterns:
+        t = re.sub(pat, "", t)
+    t = re.sub(r"[ \t]+\n", "\n", t)
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
+
+
+def _pick_longer_description(*candidates: str) -> str:
+    best = ""
+    for c in candidates:
+        s = _clean_job_description_text(c)
+        if len(s) > len(best):
+            best = s
+    return best
+
+
+def _get_fact_fuzzy(facts: dict[str, str], *needles: str) -> str:
+    """Match dl labels when Monster uses wording like \"Type of Hire\" instead of \"Job Type\"."""
+    n = [x.lower().strip() for x in needles if x.strip()]
+    if not n:
+        return ""
+    for dk, dv in facts.items():
+        dkl = dk.lower().replace(" ", "")
+        if not dv or not str(dv).strip() or str(dv).strip() == "—":
+            continue
+        if all(nd.replace(" ", "") in dkl for nd in n):
+            return str(dv).strip()
+    return ""
+
+
 async def _extract_href_with_fallback(page: Page, selectors: list[str]) -> str:
     for selector in selectors:
         try:
@@ -245,13 +372,14 @@ async def _visual_debug_scroll(page: Page) -> None:
             return False
         return True
 
-    for _ in range(8):
-        if not await _wheel(0, 1200):
+    # Keep this intentionally gentle in CDP mode to avoid aggressive visible scrolling.
+    for _ in range(2):
+        if not await _wheel(0, 300):
             return
-        await asyncio.sleep(0.8)
-    if not await _wheel(0, -10_000):
+        await asyncio.sleep(1.2)
+    if not await _wheel(0, -250):
         return
-    await asyncio.sleep(1.0)
+    await asyncio.sleep(0.8)
 
 
 async def save_debug_snapshot(page: Page, query: str, reason: str) -> tuple[str, str]:
@@ -479,6 +607,16 @@ async def _extract_from_current_page(
                 location = await _first_inner_text(page, card, sel.LISTING_LOCATION_SELECTORS)
                 salary = await _first_inner_text(page, card, sel.LISTING_SALARY_SELECTORS)
                 posted = await _first_inner_text(page, card, sel.LISTING_POSTED_SELECTORS)
+                description_snippet = await _first_inner_text(
+                    page,
+                    card,
+                    [
+                        "[data-testid='job-snippet']",
+                        "[class*='snippet']",
+                        "[class*='description']",
+                        "p",
+                    ],
+                )
 
                 results.append(
                     {
@@ -487,6 +625,7 @@ async def _extract_from_current_page(
                         "location_display": location or None,
                         "salary_text": salary or None,
                         "posted_at_text": posted or None,
+                        "description_text": description_snippet or None,
                         "job_url": full,
                     }
                 )
@@ -521,6 +660,7 @@ async def _extract_from_current_page(
                     "location_display": None,
                     "salary_text": None,
                     "posted_at_text": None,
+                    "description_text": None,
                     "job_url": full,
                 }
             )
@@ -592,17 +732,180 @@ async def scrape_job_detail_safe(job_url: str) -> dict[str, str | None]:
                             return dv.strip()
                 return ""
 
+            desc_selectors = DETAIL_SELECTORS["description"]
+
             mapped = {
                 "location": await extract_with_fallback(page, DETAIL_SELECTORS["location"]),
-                "job_type": await extract_with_fallback(page, DETAIL_SELECTORS["job_type"]) or get_fact(facts, "job type", "jobtype"),
+                "job_type": (
+                    await extract_with_fallback(page, DETAIL_SELECTORS["job_type"])
+                    or get_fact(facts, "job type", "jobtype")
+                    or _get_fact_fuzzy(facts, "type", "hire")
+                    or _get_fact_fuzzy(facts, "employment")
+                ),
                 "industry": await extract_with_fallback(page, DETAIL_SELECTORS["industry"]) or get_fact(facts, "industry"),
-                "salary": await extract_with_fallback(page, DETAIL_SELECTORS["salary"]) or get_fact(facts, "salary", "salary range"),
-                "company_size": await extract_with_fallback(page, DETAIL_SELECTORS["company_size"]) or get_fact(facts, "company size"),
-                "year_founded": await extract_with_fallback(page, DETAIL_SELECTORS["year_founded"]) or get_fact(facts, "year founded"),
-                "website": await _extract_href_with_fallback(page, DETAIL_SELECTORS["website"]) or get_fact(facts, "website"),
+                "salary": await extract_with_fallback(page, DETAIL_SELECTORS["salary"]) or get_fact(
+                    facts,
+                    "salary",
+                    "salary range",
+                ),
+                "company_size": await extract_with_fallback(page, DETAIL_SELECTORS["company_size"]) or get_fact(
+                    facts,
+                    "company size",
+                ),
+                "year_founded": await extract_with_fallback(page, DETAIL_SELECTORS["year_founded"]) or get_fact(
+                    facts,
+                    "year founded",
+                ),
+                "website": _sanitize_website_field(
+                    await _extract_href_with_fallback(page, DETAIL_SELECTORS["website"]) or get_fact(facts, "website")
+                ),
                 "about_company": await extract_with_fallback(page, DETAIL_SELECTORS["company_about"]),
-                "description": await extract_with_fallback(page, DETAIL_SELECTORS["description"]),
+                "description": await extract_longest_inner_text(page, desc_selectors),
             }
+            fallback_structured = await page.evaluate(
+                """
+                () => {
+                    const out = {
+                        job_type: "",
+                        industry: "",
+                        salary: "",
+                        company_size: "",
+                        year_founded: "",
+                        website: "",
+                        description: "",
+                    };
+                    const bodyText = (document.body?.innerText || "").replace(/\\s+/g, " ");
+                    const pick = (regex) => {
+                        const m = bodyText.match(regex);
+                        return m && m[1] ? String(m[1]).trim() : "";
+                    };
+                    const pullAfterLabel = (label) => {
+                        const re = new RegExp(
+                            label + "\\\\s*[:\\\\-]?\\\\s*(.*?)\\\\s*(?=(?:Location|Job\\\\s*Type|Type\\\\s*of\\\\s*Hire|Industry|Salary|Company\\\\s*Size|Year\\\\s*Founded|Website|About\\\\s*Company|Description|Responsibilities|Requirements)\\\\b|$)",
+                            "i"
+                        );
+                        const m = bodyText.match(re);
+                        return m && m[1] ? String(m[1]).trim() : "";
+                    };
+                    out.job_type =
+                        pullAfterLabel("Type of Hire") ||
+                        pullAfterLabel("Job Type") ||
+                        pick(/Type of Hire\\s*[:-]+\\s*([^\\n|]+)/i) ||
+                        pick(/Job Type\\s*[:-]+\\s*([^\\n|]+)/i);
+                    out.industry =
+                        pullAfterLabel("Industry") ||
+                        pick(/Industry\\s*[:-]+\\s*([^\\n|]+)/i) ||
+                        pick(/Industry\\s+([^\\n|]+)/i) ||
+                        (bodyText.match(/Other\\s*\\/\\s*Not\\s*Classified/i) ? "Other/Not Classified" : "");
+                    out.salary =
+                        pullAfterLabel("Salary") ||
+                        pick(/Salary\\s*[:-]+\\s*([^\\n|]+)/i) ||
+                        (() => {
+                            const range = bodyText.match(
+                                /(\\$[0-9,]+(?:\\.[0-9]+)?\\s*(?:–|-|to)\\s*\\$[0-9,]+(?:\\.[0-9]+)?(?:\\s*(?:per\\s*year|\\/\\s*year|year|yr))?)/i
+                            );
+                            if (range && range[1]) return String(range[1]).trim();
+                            const single = bodyText.match(
+                                /(\\$[0-9,]+(?:\\.[0-9]+)?(?:\\s*(?:per\\s*year|\\/\\s*year|year|yr))?)/i
+                            );
+                            if (single && single[1]) return String(single[1]).trim();
+                            return "";
+                        })();
+                    out.company_size =
+                        pullAfterLabel("Company Size") ||
+                        pick(/Company Size\\s*[:-]+\\s*([^\\n|]+)/i);
+                    out.year_founded =
+                        pullAfterLabel("Year Founded") ||
+                        pick(/Year Founded\\s*[:-]+\\s*([^\\n|]+)/i);
+
+                    const badHost = (u) => {
+                        try {
+                            const h = new URL(u).hostname.toLowerCase();
+                            return /onetrust|privacy|cookie|consent|trustarc|privacyportal|doubleclick|googleadservices|googlesyndication|facebook|twitter\\.com|t\\.co|instagram|youtube|tiktok|monster\\.com|indeed\\.com|glassdoor|apps\\.apple\\.com|itunes\\.apple\\.com|play\\.google\\.com|appstore/i.test(h);
+                        } catch {
+                            return true;
+                        }
+                    };
+                    const anchors = Array.from(document.querySelectorAll('a[href^="http"]')).map((a) => ({
+                        href: a.href,
+                        t: (a.innerText || "").trim(),
+                    }));
+                    const clean = anchors.filter((x) => !badHost(x.href) && !/monster\\.com/i.test(x.href));
+                    const labeled = clean.find((x) => /^(website|www\\.)/i.test(x.t) || /visit\\s+(our\\s+)?(website|company)/i.test(x.t) || /company\\s+site/i.test(x.t));
+                    out.website = (labeled || clean[0] || {}).href || "";
+                    if (!out.website) {
+                        const bodyUrl = bodyText.match(/https?:\\/\\/[^\\s)]+/i);
+                        out.website = bodyUrl && bodyUrl[0] ? String(bodyUrl[0]).trim() : "";
+                    }
+
+                    const descSels = [
+                        "[data-testid='jobDetailDescription']",
+                        "[data-testid='jobDescription']",
+                        "[data-automation='jobDescription']",
+                        "section[class*='description']",
+                        "[class*='jobDescription']",
+                        "article",
+                        "main",
+                    ];
+                    let bestD = "";
+                    descSels.forEach((s) => {
+                        document.querySelectorAll(s).forEach((el) => {
+                            const t = (el.innerText || "").trim();
+                            if (t.length > bestD.length) bestD = t;
+                        });
+                    });
+
+                    const heading = Array.from(document.querySelectorAll("h1,h2,h3,h4,strong,span,div,p"))
+                        .find((el) => /^description\\s*$/i.test((el.textContent || "").trim()));
+                    if (heading) {
+                        const container = heading.closest("section,article,main,div") || heading.parentElement;
+                        if (container) {
+                            let text = (container.textContent || "").replace(/\\s+/g, " ").trim();
+                            text = text.replace(/^Description\\s*/i, "").trim();
+                            if (text.length > bestD.length) bestD = text;
+                        }
+                    }
+                    out.description = bestD;
+                    return out;
+                }
+                """
+            )
+            if not mapped.get("job_type"):
+                mapped["job_type"] = (fallback_structured.get("job_type") or "").strip()
+            if not mapped.get("industry"):
+                mapped["industry"] = (fallback_structured.get("industry") or "").strip()
+            if not mapped.get("salary"):
+                mapped["salary"] = (fallback_structured.get("salary") or "").strip()
+            if not mapped.get("company_size"):
+                mapped["company_size"] = (fallback_structured.get("company_size") or "").strip()
+            if not mapped.get("year_founded"):
+                mapped["year_founded"] = (fallback_structured.get("year_founded") or "").strip()
+
+            fb_desc = (fallback_structured.get("description") or "").strip()
+            if not mapped.get("description"):
+                for fallback_selector in sel.DETAIL_CONTAINER_SELECTORS + ["article", "[role='main']", "body"]:
+                    try:
+                        fallback_text = await extract_longest_inner_text(page, [fallback_selector])
+                    except Exception:
+                        fallback_text = ""
+                    cleaned = (fallback_text or "").strip()
+                    if len(cleaned) >= 120:
+                        mapped["description"] = cleaned
+                        logger.info("Fallback description extracted via selector: %s", fallback_selector)
+                        break
+
+            merged = _pick_longer_description((mapped.get("description") or ""), fb_desc)
+            noisy_markers = ["Skip to content", "Find Jobs", "Salary Tools", "Career Advice", "Resume Builder"]
+            if any(m in merged for m in noisy_markers) and len(fb_desc) > len(merged) * 0.5:
+                merged = _pick_longer_description(merged, fb_desc)
+            mapped["description"] = merged
+
+            merged_site = mapped.get("website") or ""
+            if not merged_site.strip():
+                merged_site = _sanitize_website_field((fallback_structured.get("website") or "").strip())
+            else:
+                merged_site = _sanitize_website_field(merged_site)
+            mapped["website"] = merged_site
             for field_name, value in mapped.items():
                 if value:
                     logger.info("Extracted %s from detail: %s", field_name, value[:80])

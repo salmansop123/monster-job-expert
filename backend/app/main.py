@@ -3,7 +3,6 @@ import csv
 import io
 import json
 import logging
-import sys
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
@@ -12,32 +11,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from sqlalchemy import func, select
 try:
     from sse_starlette.sse import EventSourceResponse
-except ModuleNotFoundError as exc:
-    # #region agent log
-    with open(
-        "/home/salman-mazhar/Drive/Office Project/monster.com-job-project/.cursor/debug-e26ce4.log",
-        "a",
-        encoding="utf-8",
-    ) as _dbg:
-        _dbg.write(
-            json.dumps(
-                {
-                    "sessionId": "e26ce4",
-                    "runId": "run1",
-                    "hypothesisId": "H1",
-                    "location": "backend/app/main.py:14",
-                    "message": "SSE import failed during app startup",
-                    "data": {
-                        "error": str(exc),
-                        "python_executable": sys.executable,
-                    },
-                    "timestamp": int(__import__("time").time() * 1000),
-                },
-                ensure_ascii=True,
-            )
-            + "\n"
-        )
-    # #endregion
+except ModuleNotFoundError:
     class EventSourceResponse(StreamingResponse):
         def __init__(self, content, status_code: int = 200):
             async def _sse_wrapper():
@@ -86,6 +60,18 @@ async def lifespan(_app: FastAPI):
     )
     await init_db()
     logger.info("Scraping is manual-only. No background tasks run here.")
+    logger.info("Detected OS: %s — Chrome binary: %s", detect_os(), find_chrome_binary())
+    try:
+        chrome_result = await launch_chrome(
+            cdp_url=settings.chrome_cdp_url,
+            user_data_dir=settings.chrome_user_data_dir,
+        )
+        logger.info("Chrome auto-launch at startup: %s", chrome_result)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Chrome did not auto-launch (%s). Use Launch Chrome in the dashboard or start Chrome with CDP manually.",
+            exc,
+        )
     yield
 
 
@@ -98,18 +84,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-# Scraping is manual-only. No background tasks run here.
-@app.on_event("startup")
-async def startup():
-    logger.info("Detected OS: %s", detect_os())
-    logger.info("Chrome binary: %s", find_chrome_binary())
-    result = await launch_chrome(
-        cdp_url=settings.chrome_cdp_url,
-        user_data_dir=settings.chrome_user_data_dir,
-    )
-    logger.info("Chrome launch result: %s", result)
 
 
 @app.get("/")

@@ -1,8 +1,10 @@
 import asyncio
 import logging
+import os
 import platform
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import httpx
@@ -91,12 +93,17 @@ async def launch_chrome(
         "--disable-popup-blocking",
     ]
     logger.info("Launching Chrome on %s: %s", os_name, " ".join(cmd))
+    launch_env = os.environ.copy()
+    if sys.platform.startswith("linux") and not launch_env.get("DISPLAY"):
+        launch_env["DISPLAY"] = ":0"
     try:
         subprocess.Popen(
             cmd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            env=launch_env,
         )
     except Exception as exc:  # noqa: BLE001
         return {
@@ -106,7 +113,8 @@ async def launch_chrome(
             "error": str(exc),
         }
 
-    for i in range(15):
+    # First Chrome cold-start can exceed 15s on slow disks — wait longer.
+    for i in range(30):
         await asyncio.sleep(1)
         if await is_cdp_running(cdp_url):
             logger.info("Chrome CDP ready after %ss at %s", i + 1, cdp_url)
@@ -122,5 +130,5 @@ async def launch_chrome(
         "status": "timeout",
         "os": os_name,
         "binary": binary,
-        "error": "Chrome launched but CDP not ready after 15 seconds",
+        "error": "Chrome launched but CDP not ready after 30 seconds",
     }

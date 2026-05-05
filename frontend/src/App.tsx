@@ -152,13 +152,6 @@ export default function App() {
     return null;
   }, [jobs.length, searchId, status]);
 
-  function handleJobUpdated(updated: JobRecord) {
-    setSelected(updated);
-    setJobs((prev) =>
-      prev.map((j) => (j.id != null && updated.id != null && j.id === updated.id ? updated : j))
-    );
-  }
-
   function runHistorySearch(item: SearchHistoryEntry) {
     const payload: SearchRequest = {
       title: item.title,
@@ -333,11 +326,7 @@ export default function App() {
         </section>
       </main>
 
-      <JobDetailModal
-        job={selected}
-        onClose={() => setSelected(null)}
-        onJobUpdated={handleJobUpdated}
-      />
+      <JobDetailModal job={selected} onClose={() => setSelected(null)} />
     </div>
   );
 }

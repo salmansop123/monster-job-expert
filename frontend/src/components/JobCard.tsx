@@ -47,18 +47,14 @@ export default function JobCard({ job, onOpen }: Props) {
         {job.location_display || "Location flexible / TBD"}
       </p>
 
-      {job.enrichment?.summary ? (
-        <p className="mt-4 line-clamp-3 text-sm leading-relaxed text-slate-300">{job.enrichment.summary}</p>
-      ) : (
-        <p className="mt-4 text-sm italic text-slate-500">
-          AI summary fills in after GPT parses the posting.
-        </p>
-      )}
-
       <div className="mt-5 flex flex-wrap gap-2">
         <button
           type="button"
-          onClick={onOpen}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onOpen();
+          }}
           className="rounded-lg border border-white/20 bg-accent/90 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-accent"
         >
           View intelligence

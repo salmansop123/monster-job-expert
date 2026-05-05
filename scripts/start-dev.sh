@@ -60,6 +60,25 @@ if [[ ! -d "$FRONTEND_DIR/node_modules" ]]; then
   (cd "$FRONTEND_DIR" && npm install)
 fi
 
+echo "Starting Chrome with CDP (if not already running) ..."
+(
+  cd "$BACKEND_DIR"
+  # shellcheck disable=SC1091
+  source .venv/bin/activate
+  python -c "
+import asyncio
+
+async def main() -> None:
+    from app.config import settings
+    from app.scraper.chrome_launcher import launch_chrome
+
+    r = await launch_chrome(settings.chrome_cdp_url, settings.chrome_user_data_dir)
+    print('Chrome CDP bootstrap:', r)
+
+asyncio.run(main())
+"
+) || echo "Chrome bootstrap failed or was skipped — use Launch Chrome in the dashboard." >&2
+
 echo "Starting API at http://127.0.0.1:${PORT:-8000} ..."
 (
   cd "$BACKEND_DIR"
