@@ -3,7 +3,9 @@ import csv
 import io
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,15 +52,47 @@ from app.services.search_service import (
 )
 
 logger = logging.getLogger("monster.api")
+DEBUG_LOG_PATH = Path(__file__).resolve().parents[2] / ".cursor" / "debug-e26ce4.log"
+
+
+def _debug_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    # #region agent log
+    try:
+        payload = {
+            "sessionId": "e26ce4",
+            "runId": "run1",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    except Exception:
+        pass
+    # #endregion
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    _debug_log(
+        "H2",
+        "backend/app/main.py:lifespan",
+        "lifespan entry",
+        {"stage": "before_init_db", "cdp_url": settings.chrome_cdp_url},
+    )
     logging.basicConfig(
         level=logging.INFO,
         format="%(levelname)s %(name)s %(message)s",
     )
     await init_db()
+    _debug_log(
+        "H2",
+        "backend/app/main.py:lifespan",
+        "init_db completed",
+        {"stage": "after_init_db"},
+    )
     logger.info("Scraping is manual-only. No background tasks run here.")
     logger.info("Detected OS: %s — Chrome binary: %s", detect_os(), find_chrome_binary())
     try:
@@ -66,8 +100,20 @@ async def lifespan(_app: FastAPI):
             cdp_url=settings.chrome_cdp_url,
             user_data_dir=settings.chrome_user_data_dir,
         )
+        _debug_log(
+            "H2",
+            "backend/app/main.py:lifespan",
+            "launch_chrome completed",
+            {"result": chrome_result},
+        )
         logger.info("Chrome auto-launch at startup: %s", chrome_result)
     except Exception as exc:  # noqa: BLE001
+        _debug_log(
+            "H2",
+            "backend/app/main.py:lifespan",
+            "launch_chrome raised exception",
+            {"error": str(exc)},
+        )
         logger.warning(
             "Chrome did not auto-launch (%s). Use Launch Chrome in the dashboard or start Chrome with CDP manually.",
             exc,
@@ -400,7 +446,7 @@ async def export_jobs_csv(search_id: int):
 async def search_history():
     async with AsyncSessionLocal() as session:
         runs = (
-            await session.execute(select(SearchRun).order_by(SearchRun.created_at.desc()).limit(10))
+            await session.execute(select(SearchRun).order_by(SearchRun.created_at.desc()).limit(3))
         ).scalars().all()
         result = []
         for r in runs:

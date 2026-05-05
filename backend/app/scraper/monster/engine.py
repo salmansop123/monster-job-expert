@@ -294,6 +294,52 @@ def _clean_job_description_text(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", t).strip()
 
 
+def _normalize_text(raw: str | None) -> str:
+    return re.sub(r"\s+", " ", (raw or "")).strip()
+
+
+def _looks_like_ui_chrome_noise(text: str) -> bool:
+    t = text.lower()
+    markers = (
+        "tools",
+        "career advice",
+        "free resume templates",
+        "free resume builder",
+        "employers / post job",
+        "back to results",
+        "want to know if you're a fit",
+        "upload resume",
+        "have an account",
+        "log in",
+        "search enter a job keyword",
+    )
+    hits = sum(1 for m in markers if m in t)
+    return hits >= 2
+
+
+def _sanitize_listing_field(raw: str | None, *, max_len: int = 180) -> str:
+    text = _normalize_text(raw)
+    if not text:
+        return ""
+    if _looks_like_ui_chrome_noise(text):
+        return ""
+    if text.lower() in {"null", "null, null", "n/a", "none"}:
+        return ""
+    return text[:max_len].strip()
+
+
+def _sanitize_salary_text(raw: str | None) -> str:
+    text = _sanitize_listing_field(raw, max_len=120)
+    if not text:
+        return ""
+    lower = text.lower()
+    has_money = "$" in text or bool(re.search(r"\b\d{2,3}(?:,\d{3})+\b", text))
+    has_rate_word = bool(re.search(r"\b(per\s*(year|yr|hour|hr)|hourly|annually|salary)\b", lower))
+    if has_money or has_rate_word:
+        return text
+    return ""
+
+
 def _pick_longer_description(*candidates: str) -> str:
     best = ""
     for c in candidates:
@@ -602,12 +648,12 @@ async def _extract_from_current_page(
                     continue
                 seen_urls.add(norm)
 
-                title = await _first_inner_text(page, card, sel.LISTING_TITLE_SELECTORS)
-                company = await _first_inner_text(page, card, sel.LISTING_COMPANY_SELECTORS)
-                location = await _first_inner_text(page, card, sel.LISTING_LOCATION_SELECTORS)
-                salary = await _first_inner_text(page, card, sel.LISTING_SALARY_SELECTORS)
-                posted = await _first_inner_text(page, card, sel.LISTING_POSTED_SELECTORS)
-                description_snippet = await _first_inner_text(
+                raw_title = await _first_inner_text(page, card, sel.LISTING_TITLE_SELECTORS)
+                raw_company = await _first_inner_text(page, card, sel.LISTING_COMPANY_SELECTORS)
+                raw_location = await _first_inner_text(page, card, sel.LISTING_LOCATION_SELECTORS)
+                raw_salary = await _first_inner_text(page, card, sel.LISTING_SALARY_SELECTORS)
+                raw_posted = await _first_inner_text(page, card, sel.LISTING_POSTED_SELECTORS)
+                raw_description_snippet = await _first_inner_text(
                     page,
                     card,
                     [
@@ -617,6 +663,12 @@ async def _extract_from_current_page(
                         "p",
                     ],
                 )
+                title = _sanitize_listing_field(raw_title, max_len=180)
+                company = _sanitize_listing_field(raw_company, max_len=120)
+                location = _sanitize_listing_field(raw_location, max_len=120)
+                salary = _sanitize_salary_text(raw_salary)
+                posted = _sanitize_listing_field(raw_posted, max_len=60)
+                description_snippet = _sanitize_listing_field(raw_description_snippet, max_len=260)
 
                 results.append(
                     {

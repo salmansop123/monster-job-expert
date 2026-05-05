@@ -4,7 +4,6 @@ import {
   getChromeStatus,
   getScraperHealth,
   launchChrome,
-  testSelector,
   type ChromeStatus,
   type ScraperHealth,
 } from "../api";
@@ -12,9 +11,6 @@ import {
 export default function ScraperHealthPanel() {
   const [chromeStatus, setChromeStatus] = useState<ChromeStatus | null>(null);
   const [health, setHealth] = useState<ScraperHealth | null>(null);
-  const [url, setUrl] = useState("https://www.monster.com/jobs/search?q=software+engineer&where=remote");
-  const [selector, setSelector] = useState("div[data-testid='JobCard']");
-  const [result, setResult] = useState("");
   const [launching, setLaunching] = useState(false);
 
   async function checkChromeStatus() {
@@ -42,19 +38,10 @@ export default function ScraperHealthPanel() {
       if (data.status === "launched" || data.status === "already_running") {
         await checkChromeStatus();
       } else {
-        setResult(`Chrome launch failed: ${data.error || data.status}`);
+        // keep UI simple; status banner refreshes every 5s
       }
     } finally {
       setLaunching(false);
-    }
-  }
-
-  async function runSelectorTest() {
-    try {
-      const res = await testSelector({ selector, url });
-      setResult(`page_title="${res.page_title}" · matched=${res.matched}`);
-    } catch (e) {
-      setResult((e as Error).message);
     }
   }
 
@@ -99,27 +86,6 @@ export default function ScraperHealthPanel() {
         <p className="mt-2">
           Browser mode: <span className="text-slate-100">{health?.browser_mode || "unknown"}</span>
         </p>
-      </div>
-      <div className="mt-3 border-t border-white/10 pt-3 text-xs">
-        <p className="mb-2 font-semibold text-slate-200">Manual selector test</p>
-        <input
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          className="mb-2 w-full rounded border border-white/15 bg-slate-900/80 px-2 py-1 text-xs text-slate-100"
-        />
-        <input
-          value={selector}
-          onChange={(e) => setSelector(e.target.value)}
-          className="mb-2 w-full rounded border border-white/15 bg-slate-900/80 px-2 py-1 text-xs text-slate-100"
-        />
-        <button
-          type="button"
-          onClick={runSelectorTest}
-          className="rounded border border-white/20 bg-white/10 px-2 py-1 text-xs text-slate-100 hover:bg-white/20"
-        >
-          Test selector
-        </button>
-        {result ? <p className="mt-2 text-slate-300">{result}</p> : null}
       </div>
     </section>
   );

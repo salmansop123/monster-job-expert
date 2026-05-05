@@ -1,7 +1,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 
-import type { IngestMetadata, JobRecord, ScrapeProgress, SearchHistoryEntry, SearchRequest } from "./api";
+import type { JobRecord, ScrapeProgress, SearchHistoryEntry, SearchRequest } from "./api";
 import { getJobs, getSearch, getSearchHistory, postSearch } from "./api";
 import JobCard from "./components/JobCard";
 import JobDetailModal from "./components/JobDetailModal";
@@ -30,18 +30,10 @@ export default function App() {
   const [jobSort, setJobSort] = useState<"relevance" | "id">("relevance");
   const [pollTick, setPollTick] = useState(0);
   const [selected, setSelected] = useState<JobRecord | null>(null);
-  const [ingestMeta, setIngestMeta] = useState<IngestMetadata | null>(null);
   const [progress, setProgress] = useState<ScrapeProgress>({ stage: "", current: 0, total: 0, message: "" });
   const [history, setHistory] = useState<SearchHistoryEntry[]>([]);
 
   const isTerminal = status === "completed" || status === "failed";
-  const scrapedTimeLabel = useMemo(() => {
-    if (!ingestMeta?.scraped_at) return null;
-    const dt = new Date(ingestMeta.scraped_at);
-    if (Number.isNaN(dt.getTime())) return null;
-    return dt.toLocaleTimeString([], { hour12: false });
-  }, [ingestMeta?.scraped_at]);
-
   const mutation = useMutation({
     mutationFn: postSearch,
     onMutate: () => {
@@ -55,7 +47,6 @@ export default function App() {
       setSearchId(res.search_id);
       setStatus("running");
       setJobs([]);
-      setIngestMeta(null);
     },
     onError: (err: Error) => setError(err.message),
   });
@@ -98,7 +89,6 @@ export default function App() {
         const s = await getSearch(searchId);
         if (cancelled) return;
         setStatus(s.status);
-        setIngestMeta(s.ingest ?? null);
 
         const msg = s.error_message;
         if (s.status === "failed") {
@@ -231,31 +221,6 @@ export default function App() {
           <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-50">
             <p className="font-semibold text-amber-200">Note</p>
             <p className="mt-1 leading-relaxed text-amber-100/95">{infoNote}</p>
-          </div>
-        ) : null}
-
-        {ingestMeta && status === "completed" ? (
-          <div className="rounded-xl border border-indigo-500/35 bg-indigo-500/[0.07] px-4 py-3 text-xs leading-relaxed text-indigo-100/95">
-            <p className="font-semibold text-indigo-200">Ingestion / feed</p>
-            <p className="mt-1">
-              <span className="text-slate-400">Response</span> · {ingestMeta.response_status}
-              {ingestMeta.ingest_status ? (
-                <>
-                  {" "}
-                  · <span className="text-slate-400">Source status</span> · {ingestMeta.ingest_status}
-                </>
-              ) : null}
-            </p>
-            {ingestMeta.feed_last_updated && !scrapedTimeLabel ? (
-              <p className="mt-1 text-slate-400">Feed last updated · {ingestMeta.feed_last_updated}</p>
-            ) : null}
-            {scrapedTimeLabel ? (
-              <p className="mt-1 flex items-center gap-1 text-sky-200">
-                <span aria-hidden>↻</span>
-                <span>Scraped just now at {scrapedTimeLabel}</span>
-              </p>
-            ) : null}
-            {ingestMeta.message ? <p className="mt-1 text-indigo-100/90">{ingestMeta.message}</p> : null}
           </div>
         ) : null}
 

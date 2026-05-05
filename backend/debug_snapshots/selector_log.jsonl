@@ -9,3 +9,6 @@
 {"ts": "2026-05-05T16:27:21.213275", "query": "software engineer | remote", "selector": "[class*='JobCard']", "cards_found": 2, "blocked": false}
 {"ts": "2026-05-05T16:38:20.501346", "query": "python | remote", "selector": "[class*='JobCard']", "cards_found": 5, "blocked": false}
 {"ts": "2026-05-05T16:52:13.291359", "query": "python | remote", "selector": "[class*='JobCard']", "cards_found": 5, "blocked": false}
+{"ts": "2026-05-05T17:03:45.315258", "query": "AI | remote", "selector": "[class*='JobCard']", "cards_found": 6, "blocked": false}
+{"ts": "2026-05-05T17:07:46.218341", "query": "AI | remote", "selector": "[class*='JobCard']", "cards_found": 6, "blocked": false}
+{"ts": "2026-05-05T17:16:20.122697", "query": "AI | remote", "selector": "[class*='JobCard']", "cards_found": 15, "blocked": false}
