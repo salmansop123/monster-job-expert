@@ -19,7 +19,7 @@ from app.services.ingestion_runner import (
     copy_feed_to_search_run,
     ensure_query_feed_row,
     ingest_feed,
-    schedule_background_ingest,
+    invalidate_feed,
 )
 from app.services.relevance_core import combined_relevance
 
@@ -41,7 +41,11 @@ async def _count_jobs_for_feed(session, fingerprint: str) -> int:
     return int(q or 0)
 
 
-async def execute_search_background(search_id: int, criteria: SearchRequest) -> None:
+async def execute_search_background(
+    search_id: int,
+    criteria: SearchRequest,
+    force_refresh: bool = True,
+) -> None:
     """Resolve jobs from SQLite feed cache. Live Playwright ingestion runs in ingestion_runner only."""
     crit = augment_title_for_setting(criteria)
     fp_feed = query_feed_fingerprint(crit.title, crit.location)
@@ -84,13 +88,33 @@ async def execute_search_background(search_id: int, criteria: SearchRequest) -> 
 
         ingest_status_snap = getattr(feed, "ingest_status", None) if feed else None
 
-        if nj > 0 and fresh:
+        if force_refresh:
+            await invalidate_feed(crit.title, crit.location)
+            await ingest_feed(
+                fp_feed,
+                crit.title,
+                crit.location,
+                force=True,
+                enrich_with_openai=settings.enable_openai_on_ingest,
+                requested_limit=crit.limit,
+            )
+            await copy_feed_to_search_run(search_id, fp_feed, crit)
+            flt_hit = datetime.utcnow()
+            meta_json = build_result_metadata(
+                response_status="live_ingestion",
+                ingest_status=ingest_status_snap,
+                feed_last_updated=flt_hit,
+                scraped_at=flt_hit,
+                message="Fresh scrape completed for this search.",
+            )
+        elif nj > 0 and fresh:
             await copy_feed_to_search_run(search_id, fp_feed, crit)
             flt_hit = feed.last_updated_at if feed else None
             meta_json = build_result_metadata(
                 response_status="cache_hit",
                 ingest_status=ingest_status_snap,
                 feed_last_updated=flt_hit,
+                scraped_at=None,
                 message=(
                     f"Fresh feed snapshot (TTL {settings.query_feed_cache_ttl_seconds}s). Listing scrape skipped."
                 ),
@@ -98,19 +122,17 @@ async def execute_search_background(search_id: int, criteria: SearchRequest) -> 
 
         elif nj > 0 and not fresh:
             await copy_feed_to_search_run(search_id, fp_feed, crit)
-            schedule_background_ingest(fp_feed, crit.title, crit.location)
             flt_dt = feed.last_updated_at if feed else None
             meta_json = build_result_metadata(
-                response_status="stale_served_refresh_scheduled",
+                response_status="stale_served_manual_refresh_required",
                 ingest_status=ingest_status_snap,
                 feed_last_updated=flt_dt,
+                scraped_at=None,
                 message=(
-                    "Returned cached feed snapshot; background refresh queued (rate-limit aware)."
+                    "Returned cached feed snapshot; no background refresh is scheduled."
                 ),
             )
-            completion_message = (
-                "Results are slightly older than the cache TTL — a refresh was scheduled in the background."
-            )
+            completion_message = "Results are slightly older than the cache TTL — run a search to refresh."
 
         else:
             # Empty feed snapshot — ingestion populates Monster feed (serialized per query).
@@ -120,6 +142,7 @@ async def execute_search_background(search_id: int, criteria: SearchRequest) -> 
                 crit.location,
                 force=False,
                 enrich_with_openai=settings.enable_openai_on_ingest,
+                requested_limit=crit.limit,
             )
 
             async with AsyncSessionLocal() as session:
@@ -135,6 +158,7 @@ async def execute_search_background(search_id: int, criteria: SearchRequest) -> 
                     response_status="live_ingestion",
                     ingest_status=ist,
                     feed_last_updated=fld,
+                    scraped_at=fld,
                     message="Feed populated via Monster ingestion pipeline.",
                 )
             elif feed_live and feed_live.ingest_status in {"blocked", "failed"}:
@@ -146,6 +170,7 @@ async def execute_search_background(search_id: int, criteria: SearchRequest) -> 
                     response_status="blocked",
                     ingest_status=feed_live.ingest_status,
                     feed_last_updated=fld,
+                    scraped_at=None,
                     message=completion_message[:2000],
                 )
             else:
@@ -154,6 +179,7 @@ async def execute_search_background(search_id: int, criteria: SearchRequest) -> 
                     response_status="empty",
                     ingest_status=ist or "success",
                     feed_last_updated=fld,
+                    scraped_at=None,
                     message=completion_message,
                 )
 
@@ -176,6 +202,7 @@ async def execute_search_background(search_id: int, criteria: SearchRequest) -> 
                 response_status="failed",
                 ingest_status="failed",
                 feed_last_updated=None,
+                scraped_at=None,
                 message=str(exc)[:2000],
             )
             await session.execute(
@@ -241,6 +268,7 @@ async def get_search_status(search_id: int) -> SearchStatusResponse | None:
                 response_status=ingest_payload.get("response_status", "") or "",
                 ingest_status=ingest_payload.get("ingest_status"),
                 feed_last_updated=fl_dt,
+                scraped_at=_parse_maybe_iso(ingest_payload.get("scraped_at")),
                 message=ingest_payload.get("message"),
             )
 
@@ -319,6 +347,12 @@ def job_row_to_record(r: JobStored) -> JobRecord:
         source=r.source,
         relevance_score=r.relevance_score,
         description_text=r.description_text,
+        job_type=r.job_type,
+        industry=r.industry,
+        company_size=r.company_size,
+        year_founded=r.year_founded,
+        website=r.website,
+        about_company=r.about_company,
         enrichment=enrichment,
         openai_model=r.openai_model,
         openai_prompt_tokens=r.openai_prompt_tokens,

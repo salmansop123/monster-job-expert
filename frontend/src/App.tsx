@@ -1,10 +1,11 @@
 import { useMutation } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 
-import type { IngestMetadata, JobRecord } from "./api";
-import { getJobs, getSearch, postSearch } from "./api";
+import type { IngestMetadata, JobRecord, ScrapeProgress, SearchHistoryEntry, SearchRequest } from "./api";
+import { getJobs, getSearch, getSearchHistory, postSearch } from "./api";
 import JobCard from "./components/JobCard";
 import JobDetailModal from "./components/JobDetailModal";
+import ScraperHealthPanel from "./components/ScraperHealthPanel";
 import SearchForm from "./components/SearchForm";
 
 /** Completed searches may attach an informational note (e.g. empty results, cache hit). */
@@ -30,14 +31,25 @@ export default function App() {
   const [pollTick, setPollTick] = useState(0);
   const [selected, setSelected] = useState<JobRecord | null>(null);
   const [ingestMeta, setIngestMeta] = useState<IngestMetadata | null>(null);
+  const [progress, setProgress] = useState<ScrapeProgress>({ stage: "", current: 0, total: 0, message: "" });
+  const [history, setHistory] = useState<SearchHistoryEntry[]>([]);
 
   const isTerminal = status === "completed" || status === "failed";
+  const scrapedTimeLabel = useMemo(() => {
+    if (!ingestMeta?.scraped_at) return null;
+    const dt = new Date(ingestMeta.scraped_at);
+    if (Number.isNaN(dt.getTime())) return null;
+    return dt.toLocaleTimeString([], { hour12: false });
+  }, [ingestMeta?.scraped_at]);
 
   const mutation = useMutation({
     mutationFn: postSearch,
     onMutate: () => {
       setError(null);
       setInfoNote(null);
+      setJobs([]);
+      setSelected(null);
+      setStatus("running");
     },
     onSuccess: (res) => {
       setSearchId(res.search_id);
@@ -47,6 +59,24 @@ export default function App() {
     },
     onError: (err: Error) => setError(err.message),
   });
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const data = await getSearchHistory();
+        if (!cancelled) setHistory(data);
+      } catch {
+        if (!cancelled) setHistory([]);
+      }
+    };
+    run();
+    const id = window.setInterval(run, 10000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
 
   useEffect(() => {
     if (!searchId || isTerminal) return undefined;
@@ -97,6 +127,20 @@ export default function App() {
     };
   }, [searchId, pollTick, jobSort]);
 
+  useEffect(() => {
+    if (status !== "running" && status !== "queued") return;
+    const es = new EventSource("/api/scraper/progress");
+    es.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data) as ScrapeProgress;
+        setProgress(data);
+      } catch {
+        // ignore malformed payload
+      }
+    };
+    return () => es.close();
+  }, [status]);
+
   const banner = useMemo(() => {
     if (!searchId) return null;
     if (status === "running" || status === "queued") {
@@ -113,6 +157,19 @@ export default function App() {
     setJobs((prev) =>
       prev.map((j) => (j.id != null && updated.id != null && j.id === updated.id ? updated : j))
     );
+  }
+
+  function runHistorySearch(item: SearchHistoryEntry) {
+    const payload: SearchRequest = {
+      title: item.title,
+      location: item.location,
+      limit: item.num_jobs || 1,
+    };
+    mutation.mutate(payload);
+  }
+
+  function exportCSV(currentSearchId: number) {
+    window.open(`/api/search/${currentSearchId}/export-csv`, "_blank");
   }
 
   return (
@@ -134,7 +191,48 @@ export default function App() {
       </header>
 
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-10">
-        <SearchForm onSubmit={(body) => mutation.mutate(body)} busy={mutation.isPending} />
+        <SearchForm
+          onSubmit={(body) => mutation.mutate(body)}
+          busy={mutation.isPending}
+        />
+        {status === "running" && progress.total > 0 ? (
+          <div className="rounded-xl border border-white/10 bg-white/5 px-4 py-3">
+            <div className="mb-2 text-sm text-slate-300">{progress.message}</div>
+            <div className="h-1.5 overflow-hidden rounded bg-white/10">
+              <div
+                className="h-full rounded bg-emerald-400 transition-all"
+                style={{ width: `${Math.min(100, (progress.current / progress.total) * 100)}%` }}
+              />
+            </div>
+            <div className="mt-1 text-xs text-slate-400">
+              {progress.current} of {progress.total} jobs
+            </div>
+          </div>
+        ) : null}
+        <div className="rounded-xl border border-white/10 bg-white/5 px-4 py-3">
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Recent searches</p>
+          <div className="space-y-2">
+            {history.map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                onClick={() => runHistorySearch(s)}
+                className="flex w-full items-center justify-between rounded-md border border-white/10 bg-slate-900/40 px-3 py-2 text-left hover:bg-slate-900/70"
+              >
+                <div>
+                  <div className="text-sm font-medium text-slate-100">{s.title}</div>
+                  <div className="text-xs text-slate-400">
+                    {s.location} · {s.result_count} jobs
+                  </div>
+                </div>
+                <span className="text-[11px] text-slate-500">
+                  {new Date(s.created_at).toLocaleDateString()}
+                </span>
+              </button>
+            ))}
+            {history.length === 0 ? <p className="text-xs text-slate-500">No recent searches yet.</p> : null}
+          </div>
+        </div>
 
         {infoNote ? (
           <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-50">
@@ -155,8 +253,14 @@ export default function App() {
                 </>
               ) : null}
             </p>
-            {ingestMeta.feed_last_updated ? (
+            {ingestMeta.feed_last_updated && !scrapedTimeLabel ? (
               <p className="mt-1 text-slate-400">Feed last updated · {ingestMeta.feed_last_updated}</p>
+            ) : null}
+            {scrapedTimeLabel ? (
+              <p className="mt-1 flex items-center gap-1 text-sky-200">
+                <span aria-hidden>↻</span>
+                <span>Scraped just now at {scrapedTimeLabel}</span>
+              </p>
             ) : null}
             {ingestMeta.message ? <p className="mt-1 text-indigo-100/90">{ingestMeta.message}</p> : null}
           </div>
@@ -178,6 +282,8 @@ export default function App() {
           </div>
         ) : null}
 
+        <ScraperHealthPanel />
+
         <section className="space-y-4">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
@@ -186,6 +292,15 @@ export default function App() {
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs text-slate-500">{jobs.length} shown</span>
+              {jobs.length > 0 && searchId ? (
+                <button
+                  type="button"
+                  onClick={() => exportCSV(searchId)}
+                  className="rounded-md border border-white/20 bg-slate-900/40 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-900/70"
+                >
+                  Export CSV
+                </button>
+              ) : null}
               <label className="flex items-center gap-2 text-xs text-slate-400">
                 <span className="whitespace-nowrap">Sort</span>
                 <select

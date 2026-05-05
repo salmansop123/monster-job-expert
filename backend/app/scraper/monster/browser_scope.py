@@ -42,16 +42,8 @@ async def light_human_gesture(page) -> None:
 
 
 async def bootstrap_session() -> None:
-    """Run manually once to capture cookies after any human interaction/CAPTCHA."""
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, slow_mo=120)
-        context = await browser.new_context()
-        page = await context.new_page()
-        await page.goto("https://www.monster.com", wait_until="domcontentloaded")
-        input("Solve any challenge in browser, then press Enter...")
-        cookies = await context.cookies()
-        COOKIE_FILE.write_text(json.dumps(cookies), encoding="utf-8")
-        await browser.close()
+    """Deprecated when using real Chrome via CDP."""
+    return None
 
 
 async def load_session_cookies(context) -> bool:
@@ -67,60 +59,44 @@ async def load_session_cookies(context) -> bool:
     return False
 
 
-@asynccontextmanager
-async def monster_browser_context(playwright: Playwright, *, headless_override: bool | None = None):
-    """Prefer persistent Chromium profile when `playwright_user_data_dir` is set."""
-    ud_raw = (settings.playwright_user_data_dir or "").strip()
-    storage_raw = (settings.playwright_storage_state_path or "").strip()
-    ud_path = Path(ud_raw).resolve() if ud_raw else None
-    browser: Browser | None = None
-    ctx: Any = None
-
-    base_opts = {
-        "viewport": {"width": 1280, "height": 900},
-        "user_agent": _DEFAULT_UA,
-    }
-
+async def get_browser(playwright: Playwright) -> Browser:
+    """
+    ONLY connects to real Chrome via CDP.
+    Never launches a new browser — doing so causes immediate IP block.
+    """
+    if not settings.use_cdp_chrome:
+        raise RuntimeError(
+            "USE_CDP_CHROME must be set to true in .env. "
+            "The scraper does not launch its own browser. "
+            "See README for Chrome CDP setup instructions."
+        )
     try:
-        if ud_path:
-            ud_path.mkdir(parents=True, exist_ok=True)
-            ctx = await playwright.chromium.launch_persistent_context(
-                user_data_dir=str(ud_path),
-                headless=settings.playwright_headless if headless_override is None else headless_override,
-                slow_mo=settings.playwright_slow_mo_ms,
-                **base_opts,
-            )
-            await load_session_cookies(ctx)
-        else:
-            browser = await playwright.chromium.launch(
-                headless=settings.playwright_headless if headless_override is None else headless_override,
-                slow_mo=settings.playwright_slow_mo_ms,
-            )
-            ctx_opts = dict(base_opts)
-            sto = Path(storage_raw) if storage_raw else None
-            if sto and sto.is_file():
-                ctx_opts["storage_state"] = str(sto.resolve())
-            ctx = await browser.new_context(**ctx_opts)
-            await load_session_cookies(ctx)
+        browser = await playwright.chromium.connect_over_cdp(settings.chrome_cdp_url)
+        return browser
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not connect to Chrome at {settings.chrome_cdp_url}. "
+            f"Make sure Chrome is running with: "
+            f"google-chrome --remote-debugging-port=9222 "
+            f"--user-data-dir=/tmp/chrome-monster-profile"
+        ) from e
 
-        yield ctx
 
-    finally:
-        if ctx is not None:
+@asynccontextmanager
+async def monster_browser_context():
+    async with async_playwright() as playwright:
+        browser = await get_browser(playwright)
+        try:
+            contexts = browser.contexts
+            context = contexts[0] if contexts else await browser.new_context(
+                user_agent=_DEFAULT_UA,
+                viewport={"width": 1366, "height": 768},
+            )
+
+            page = await context.new_page()
             try:
-                if (
-                    ud_path
-                    and settings.playwright_save_storage_state
-                    and settings.playwright_storage_state_path
-                ):
-                    out = Path(settings.playwright_storage_state_path)
-                    out.parent.mkdir(parents=True, exist_ok=True)
-                    await ctx.storage_state(path=str(out.resolve()))
-                await ctx.close()
-            except Exception:
-                pass
-        if browser:
-            try:
-                await browser.close()
-            except Exception:
-                pass
+                yield browser, context, page
+            finally:
+                await page.close()
+        except Exception:
+            raise

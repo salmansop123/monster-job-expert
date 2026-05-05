@@ -1,0 +1,6 @@
+{"ts": "2026-05-05T15:23:24.834107", "query": "software engineer | remote", "selector": "", "cards_found": 0, "blocked": false}
+{"ts": "2026-05-05T15:23:30.526859", "query": "software engineer | remote", "selector": "", "cards_found": 0, "blocked": false}
+{"ts": "2026-05-05T15:24:04.046603", "query": "software engineer | remote", "selector": "[class*='JobCard']", "cards_found": 4, "blocked": false}
+{"ts": "2026-05-05T15:24:11.228786", "query": "AI | remote", "selector": "[class*='JobCard']", "cards_found": 5, "blocked": false}
+{"ts": "2026-05-05T15:26:32.232919", "query": "software engineer | remote", "selector": "[class*='JobCard']", "cards_found": 4, "blocked": false}
+{"ts": "2026-05-05T15:40:44.328771", "query": "AI | remote", "selector": "[class*='JobCard']", "cards_found": 5, "blocked": false}

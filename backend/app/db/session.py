@@ -50,6 +50,60 @@ def _ensure_search_run_result_metadata_column(sync_conn) -> None:
         sync_conn.execute(text("ALTER TABLE search_runs ADD COLUMN result_metadata_json TEXT"))
 
 
+def _ensure_feed_jobs_scraped_at_column(sync_conn) -> None:
+    from sqlalchemy import inspect, text
+
+    insp = inspect(sync_conn)
+    if not insp.has_table("feed_jobs"):
+        return
+    cols = {c["name"] for c in insp.get_columns("feed_jobs")}
+    if "scraped_at" not in cols:
+        sync_conn.execute(text("ALTER TABLE feed_jobs ADD COLUMN scraped_at DATETIME"))
+    sync_conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_feed_jobs_scraped_at ON feed_jobs (scraped_at)")
+    )
+
+
+def _ensure_feed_jobs_detail_columns(sync_conn) -> None:
+    from sqlalchemy import inspect, text
+
+    insp = inspect(sync_conn)
+    if not insp.has_table("feed_jobs"):
+        return
+    cols = {c["name"] for c in insp.get_columns("feed_jobs")}
+    wanted = {
+        "job_type": "TEXT",
+        "industry": "TEXT",
+        "company_size": "TEXT",
+        "year_founded": "TEXT",
+        "website": "TEXT",
+        "about_company": "TEXT",
+    }
+    for col, typ in wanted.items():
+        if col not in cols:
+            sync_conn.execute(text(f"ALTER TABLE feed_jobs ADD COLUMN {col} {typ}"))
+
+
+def _ensure_jobs_detail_columns(sync_conn) -> None:
+    from sqlalchemy import inspect, text
+
+    insp = inspect(sync_conn)
+    if not insp.has_table("jobs"):
+        return
+    cols = {c["name"] for c in insp.get_columns("jobs")}
+    wanted = {
+        "job_type": "TEXT",
+        "industry": "TEXT",
+        "company_size": "TEXT",
+        "year_founded": "TEXT",
+        "website": "TEXT",
+        "about_company": "TEXT",
+    }
+    for col, typ in wanted.items():
+        if col not in cols:
+            sync_conn.execute(text(f"ALTER TABLE jobs ADD COLUMN {col} {typ}"))
+
+
 async def init_db() -> None:
     from app.db.models import Base  # noqa: F401 — registers FeedJob / QueryFeed mappers
 
@@ -61,3 +115,9 @@ async def init_db() -> None:
         await conn.run_sync(_ensure_jobs_relevance_score_column)
     async with engine.begin() as conn:
         await conn.run_sync(_ensure_search_run_result_metadata_column)
+    async with engine.begin() as conn:
+        await conn.run_sync(_ensure_feed_jobs_scraped_at_column)
+    async with engine.begin() as conn:
+        await conn.run_sync(_ensure_feed_jobs_detail_columns)
+    async with engine.begin() as conn:
+        await conn.run_sync(_ensure_jobs_detail_columns)

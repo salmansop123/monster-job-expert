@@ -1,4 +1,4 @@
-import type { FormEvent } from "react";
+import type { ChangeEvent, FormEvent } from "react";
 import { useState } from "react";
 
 import type { SearchRequest } from "../api";
@@ -11,14 +11,22 @@ interface Props {
 export default function SearchForm({ onSubmit, busy }: Props) {
   const [title, setTitle] = useState("");
   const [location, setLocation] = useState("remote");
-  const [limit, setLimit] = useState(8);
+  const [numJobs, setNumJobs] = useState<string>("");
+
+  function handleNumJobsChange(e: ChangeEvent<HTMLInputElement>) {
+    const raw = e.target.value;
+    const cleaned = raw.replace(/\D/g, "").replace(/^0+(\d)/, "$1");
+    setNumJobs(cleaned);
+  }
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    const parsed = parseInt(numJobs, 10);
+    const jobCount = Number.isFinite(parsed) ? Math.min(50, Math.max(1, parsed)) : 1;
     onSubmit({
       title: title.trim(),
       location: location.trim(),
-      limit,
+      limit: jobCount,
     });
   }
 
@@ -67,10 +75,22 @@ export default function SearchForm({ onSubmit, busy }: Props) {
             type="number"
             min={1}
             max={50}
-            value={limit}
-            onChange={(e) => setLimit(Number(e.target.value))}
+            placeholder="0"
+            value={numJobs}
+            onChange={handleNumJobsChange}
+            onFocus={(e) => {
+              if (e.target.value === "0") setNumJobs("");
+            }}
+            onBlur={(e) => {
+              if (!e.target.value) setNumJobs("");
+            }}
             className="rounded-xl border border-white/10 bg-ink-950/80 px-4 py-2.5 text-sm text-white outline-none ring-accent/40 transition focus:border-accent/50 focus:ring-2"
           />
+          {(parseInt(numJobs, 10) || 0) > 20 ? (
+            <div className="text-xs text-amber-300">
+              High counts mean slower scraping. Recommended: 5–10 jobs per search.
+            </div>
+          ) : null}
         </label>
       </div>
 
@@ -80,7 +100,7 @@ export default function SearchForm({ onSubmit, busy }: Props) {
           disabled={busy}
           className="inline-flex items-center justify-center rounded-xl bg-accent px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-500/25 transition hover:bg-accent-dim disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {busy ? "Running search…" : "Run Monster.com search"}
+          {busy ? "Running search…" : "Search Monster.com (fresh scrape)"}
         </button>
         <span className="max-w-xl text-xs text-slate-500">
           Only Monster.com is used — if the site blocks automation, the search fails with an explanation (no other job

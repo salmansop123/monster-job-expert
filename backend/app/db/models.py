@@ -50,6 +50,13 @@ class FeedJob(Base):
     openai_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     openai_prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     openai_completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    job_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    industry: Mapped[str | None] = mapped_column(Text, nullable=True)
+    company_size: Mapped[str | None] = mapped_column(Text, nullable=True)
+    year_founded: Mapped[str | None] = mapped_column(Text, nullable=True)
+    website: Mapped[str | None] = mapped_column(Text, nullable=True)
+    about_company: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scraped_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
     feed: Mapped["QueryFeed"] = relationship(back_populates="jobs")
 
@@ -103,5 +110,11 @@ class JobStored(Base):
     openai_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     openai_prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     openai_completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    job_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    industry: Mapped[str | None] = mapped_column(Text, nullable=True)
+    company_size: Mapped[str | None] = mapped_column(Text, nullable=True)
+    year_founded: Mapped[str | None] = mapped_column(Text, nullable=True)
+    website: Mapped[str | None] = mapped_column(Text, nullable=True)
+    about_company: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     search_run: Mapped["SearchRun"] = relationship(back_populates="jobs")

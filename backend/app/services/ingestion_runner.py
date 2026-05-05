@@ -22,6 +22,12 @@ _logger = logging.getLogger("monster.ingest")
 
 monster_source = MonsterJobSource()
 _feed_locks: dict[str, asyncio.Lock] = {}
+scrape_progress: dict[str, object] = {
+    "stage": "",
+    "current": 0,
+    "total": 0,
+    "message": "",
+}
 
 
 def feed_ingest_lock(fp: str) -> asyncio.Lock:
@@ -68,11 +74,21 @@ async def ensure_query_feed_row(title: str, location: str) -> str:
     return fp
 
 
-def _criteria_for_feed_row(title: str, location: str) -> SearchRequest:
+def _criteria_for_feed_row(
+    title: str,
+    location: str,
+    requested_limit: int | None = None,
+) -> SearchRequest:
+    effective_limit = (
+        requested_limit
+        if requested_limit is not None
+        else min(settings.ingest_max_jobs, settings.max_jobs_per_search)
+    )
+    effective_limit = max(1, min(int(effective_limit), settings.max_jobs_per_search))
     crit = SearchRequest(
         title=title.strip(),
         location=(location or "").strip(),
-        limit=min(settings.ingest_max_jobs, settings.max_jobs_per_search),
+        limit=effective_limit,
     )
     return augment_title_for_setting(crit)
 
@@ -93,8 +109,24 @@ async def persist_listing_into_feed_jobs(
 ) -> None:
     """Build rows in-memory, then replace feed_jobs in one transaction."""
     staged: list[FeedJob] = []
+    scrape_progress.update(
+        {
+            "stage": "detail",
+            "current": 0,
+            "total": len(outcome.jobs),
+            "message": f"Fetching job 0 of {len(outcome.jobs)}...",
+        }
+    )
 
     for idx, row in enumerate(outcome.jobs):
+        scrape_progress.update(
+            {
+                "stage": "detail",
+                "current": idx + 1,
+                "total": len(outcome.jobs),
+                "message": f"Fetching job {idx + 1} of {len(outcome.jobs)}...",
+            }
+        )
         jr = JobRecord(
             title=row.get("title"),
             company=row.get("company"),
@@ -111,6 +143,16 @@ async def persist_listing_into_feed_jobs(
             jr.description_text = detail["description_text"]
         if detail.get("title") and not jr.title:
             jr.title = detail["title"]
+        if detail.get("location") and not jr.location_display:
+            jr.location_display = detail["location"]
+        if detail.get("salary") and not jr.salary_text:
+            jr.salary_text = detail["salary"]
+        jr.job_type = detail.get("job_type")
+        jr.industry = detail.get("industry")
+        jr.company_size = detail.get("company_size")
+        jr.year_founded = detail.get("year_founded")
+        jr.website = detail.get("website")
+        jr.about_company = detail.get("about_company")
 
         enrichment = None
         prompt_tok = completion_tok = None
@@ -121,6 +163,14 @@ async def persist_listing_into_feed_jobs(
             and settings.openai_api_key.strip()
             and jr.description_text
         ):
+            scrape_progress.update(
+                {
+                    "stage": "enrichment",
+                    "current": idx + 1,
+                    "total": len(outcome.jobs),
+                    "message": "Enriching with AI...",
+                }
+            )
             try:
                 enrichment_result, meta = await asyncio.to_thread(enrich_job_record, jr)
                 enrichment = enrichment_result
@@ -153,6 +203,13 @@ async def persist_listing_into_feed_jobs(
                 openai_model=model_name,
                 openai_prompt_tokens=prompt_tok,
                 openai_completion_tokens=completion_tok,
+                job_type=jr.job_type,
+                industry=jr.industry,
+                company_size=jr.company_size,
+                year_founded=jr.year_founded,
+                website=jr.website,
+                about_company=jr.about_company,
+                scraped_at=datetime.utcnow(),
             )
         )
 
@@ -169,6 +226,7 @@ async def ingest_feed(
     *,
     force: bool = False,
     enrich_with_openai: bool = False,
+    requested_limit: int | None = None,
 ) -> None:
     """Acquires feed lock — rate-limited when cached rows exist and window active."""
     lock = feed_ingest_lock(fingerprint)
@@ -210,9 +268,17 @@ async def ingest_feed(
             await session.commit()
 
         _logger.info("ingest_feed start fp=%s jobs_before=%s", fingerprint, nj)
+        scrape_progress.update(
+            {
+                "stage": "listing",
+                "current": 0,
+                "total": 0,
+                "message": "Finding job listings...",
+            }
+        )
         await scrape_log_write(fingerprint, "ingest_start", "Ingestion started", jobs_count=nj)
 
-        crit = _criteria_for_feed_row(title, location)
+        crit = _criteria_for_feed_row(title, location, requested_limit=requested_limit)
         outcome = None
         try:
             outcome = await monster_source.fetch_jobs_with_retries(crit)
@@ -266,6 +332,14 @@ async def ingest_feed(
                 feed.is_processing = False
                 await session.commit()
                 _logger.info("ingest_feed done fp=%s rows=%s", fingerprint, len(outcome.jobs))
+                scrape_progress.update(
+                    {
+                        "stage": "done",
+                        "current": len(outcome.jobs),
+                        "total": len(outcome.jobs),
+                        "message": "Done",
+                    }
+                )
                 return
 
             if outcome.status in {"blocked", "failed"}:
@@ -279,6 +353,9 @@ async def ingest_feed(
                     outcome.message or outcome.status,
                     jobs_count=0,
                 )
+                scrape_progress.update(
+                    {"stage": "done", "current": 0, "total": 0, "message": "Done"}
+                )
                 return
 
             await session.execute(delete(FeedJob).where(FeedJob.fingerprint == fingerprint))
@@ -288,38 +365,22 @@ async def ingest_feed(
             feed.next_scrape_allowed_at = now2 + timedelta(seconds=settings.ingest_rate_limit_seconds)
             feed.is_processing = False
             await session.commit()
+            scrape_progress.update({"stage": "done", "current": 0, "total": 0, "message": "Done"})
 
 
-async def scheduled_refresh_all_feeds() -> None:
-    """Scheduler entrypoint — refresh every known query subject to rate limits inside ingest_feed."""
-    try:
-        async with AsyncSessionLocal() as session:
-            rows = (await session.execute(select(QueryFeed.fingerprint, QueryFeed.title, QueryFeed.location))).all()
-    except Exception as exc:
-        _logger.warning("scheduled_refresh_all_feeds load failed: %s", exc)
-        return
-
-    for fp, title, location in rows:
-        try:
-            await ingest_feed(fp, title, location, force=False, enrich_with_openai=False)
-        except Exception as exc:
-            _logger.warning("scheduled refresh failed fp=%s: %s", fp, exc)
-
-
-def schedule_background_ingest(fingerprint: str, title: str, location: str) -> None:
-    async def runner() -> None:
-        try:
-            await ingest_feed(
-                fingerprint,
-                title,
-                location,
-                force=False,
-                enrich_with_openai=False,
-            )
-        except Exception as exc:
-            _logger.warning("background ingest failed: %s", exc)
-
-    asyncio.create_task(runner())
+async def invalidate_feed(title: str, location: str) -> None:
+    """Delete cached feed jobs and reset feed freshness metadata for a query."""
+    fp = query_feed_fingerprint(title, location)
+    async with AsyncSessionLocal() as session:
+        await session.execute(delete(FeedJob).where(FeedJob.fingerprint == fp))
+        feed = await session.get(QueryFeed, fp)
+        if feed is not None:
+            feed.last_updated_at = None
+            feed.next_scrape_allowed_at = None
+            feed.ingest_status = "pending"
+            feed.ingest_message = "Feed invalidated for force refresh."
+            feed.is_processing = False
+        await session.commit()
 
 
 async def copy_feed_to_search_run(search_id: int, fingerprint: str, criteria: SearchRequest) -> int:
@@ -328,7 +389,7 @@ async def copy_feed_to_search_run(search_id: int, fingerprint: str, criteria: Se
         stmt = (
             select(FeedJob)
             .where(FeedJob.fingerprint == fingerprint)
-            .order_by(FeedJob.sort_order.asc(), FeedJob.id.asc())
+            .order_by(FeedJob.scraped_at.desc(), FeedJob.sort_order.asc(), FeedJob.id.asc())
         )
         rows = (await session.execute(stmt)).scalars().all()
 
@@ -368,6 +429,12 @@ async def copy_feed_to_search_run(search_id: int, fingerprint: str, criteria: Se
                     openai_model=fj.openai_model,
                     openai_prompt_tokens=fj.openai_prompt_tokens,
                     openai_completion_tokens=fj.openai_completion_tokens,
+                    job_type=fj.job_type,
+                    industry=fj.industry,
+                    company_size=fj.company_size,
+                    year_founded=fj.year_founded,
+                    website=fj.website,
+                    about_company=fj.about_company,
                 )
             )
             n += 1
@@ -380,12 +447,14 @@ def build_result_metadata(
     response_status: str,
     ingest_status: str | None,
     feed_last_updated: datetime | None,
+    scraped_at: datetime | None,
     message: str | None,
 ) -> str:
     payload = {
         "response_status": response_status,
         "ingest_status": ingest_status,
         "feed_last_updated": feed_last_updated.isoformat() if feed_last_updated else None,
+        "scraped_at": scraped_at.isoformat() if scraped_at else None,
         "message": message,
     }
     return json.dumps(payload)

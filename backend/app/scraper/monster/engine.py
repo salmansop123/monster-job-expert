@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import random
 import time
@@ -11,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
-from playwright.async_api import Page, async_playwright
+from playwright.async_api import Page
 
 from app.config import settings
 from app.schemas.job import SearchRequest
@@ -26,6 +27,59 @@ from app.scraper.monster.urls import build_search_url
 logger = logging.getLogger("monster.scraper")
 DEBUG_DIR = Path("debug_snapshots")
 DEBUG_DIR.mkdir(exist_ok=True)
+SELECTOR_LOG_FILE = DEBUG_DIR / "selector_log.jsonl"
+
+DETAIL_SELECTORS: dict[str, list[str]] = {
+    "location": [
+        "[data-testid='jobDetailLocation']",
+        ".job-detail-location",
+        "[class*='location']",
+        "span[itemprop='addressLocality']",
+    ],
+    "job_type": [
+        "[data-testid='jobDetailJobType']",
+        ".job-type",
+        "[class*='jobType']",
+        "[class*='job-type']",
+    ],
+    "industry": [
+        "[data-testid='jobDetailIndustry']",
+        "[class*='industry']",
+        ".industry",
+    ],
+    "salary": [
+        "[data-testid='jobDetailSalary']",
+        "[class*='salary']",
+        ".salary",
+    ],
+    "company_size": [
+        "[data-testid='companySize']",
+        "[class*='companySize']",
+        "[class*='company-size']",
+    ],
+    "year_founded": [
+        "[data-testid='yearFounded']",
+        "[class*='yearFounded']",
+        "[class*='year-founded']",
+    ],
+    "website": [
+        "[data-testid='companyWebsite']",
+        "a[class*='website']",
+        "a[class*='companyWebsite']",
+    ],
+    "description": [
+        "[data-testid='jobDetailDescription']",
+        ".job-description",
+        "[class*='jobDescription']",
+        "#JobDescription",
+        "[class*='description-content']",
+    ],
+    "company_about": [
+        "[data-testid='companyAbout']",
+        "[class*='companyAbout']",
+        "[class*='about-company']",
+    ],
+}
 
 
 class MonsterBlockedError(RuntimeError):
@@ -122,6 +176,34 @@ async def _first_href(page: Page, scope, candidates: list[str]) -> str | None:
     return None
 
 
+async def extract_with_fallback(page: Page, selectors: list[str]) -> str:
+    for selector in selectors:
+        try:
+            el = await page.query_selector(selector)
+            if not el:
+                continue
+            text = await el.inner_text()
+            if text and text.strip():
+                return text.strip()
+        except Exception:
+            continue
+    return ""
+
+
+async def _extract_href_with_fallback(page: Page, selectors: list[str]) -> str:
+    for selector in selectors:
+        try:
+            el = await page.query_selector(selector)
+            if not el:
+                continue
+            href = await el.get_attribute("href")
+            if href and href.strip():
+                return href.strip()
+        except Exception:
+            continue
+    return ""
+
+
 async def _collect_cards(page: Page) -> SelectorMatch:
     for css in sel.LISTING_JOB_CARD_SELECTORS:
         try:
@@ -151,7 +233,7 @@ async def _page_looks_blocked(page: Page) -> bool:
 
 
 async def _visual_debug_scroll(page: Page) -> None:
-    if settings.playwright_headless or not settings.playwright_visual_scroll_debug:
+    if not settings.playwright_visual_scroll_debug:
         return
 
     async def _wheel(dx: float, dy: float) -> bool:
@@ -182,28 +264,64 @@ async def save_debug_snapshot(page: Page, query: str, reason: str) -> tuple[str,
     return str(html_path), str(img_path)
 
 
+def _append_selector_history(
+    *,
+    query: str,
+    selector: str | None,
+    cards_found: int,
+    blocked: bool,
+) -> None:
+    payload = {
+        "ts": datetime.utcnow().isoformat(),
+        "query": query,
+        "selector": selector or "",
+        "cards_found": int(cards_found),
+        "blocked": bool(blocked),
+    }
+    try:
+        with SELECTOR_LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    except Exception as exc:
+        logger.warning("Failed writing selector history: %s", exc)
+
+
+def load_selector_history(limit: int = 50) -> list[dict[str, object]]:
+    if not SELECTOR_LOG_FILE.exists():
+        return []
+    out: list[dict[str, object]] = []
+    try:
+        with SELECTOR_LOG_FILE.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except Exception:
+                    continue
+    except Exception:
+        return []
+    return out[-limit:]
+
+
 async def _scrape_listing_jobs_once(
     criteria: SearchRequest,
-    *,
-    headless_override: bool | None = None,
 ) -> tuple[ListingScrapeResult, str | None]:
     """
     Monster SERP scrape — limited pages/jobs when using default ingest-oriented settings,
     randomized pacing, graceful degradation on failures.
     """
     url = build_search_url(criteria)
-    cap = min(criteria.limit, settings.max_jobs_per_search, settings.ingest_max_jobs)
+    logger.info("Browser mode: %s", "CDP" if settings.use_cdp_chrome else "disabled")
+    requested = max(1, int(criteria.limit))
+    cap = min(requested, settings.max_jobs_per_search)
     max_pages = max(1, min(8, settings.ingest_max_pages))
     results: list[dict[str, str | None]] = []
     blocked_hit = False
     selector_used: str | None = None
 
-    async with async_playwright() as p:
-        async with monster_browser_context(p, headless_override=headless_override) as context:
-            try:
-                page = await context.new_page()
-            except Exception:
-                return ListingScrapeResult([], False), None
+    async with monster_browser_context() as (_browser, _context, page):
+        try:
             page.set_default_timeout(45_000)
 
             try:
@@ -216,15 +334,17 @@ async def _scrape_listing_jobs_once(
                     except Exception:
                         return ListingScrapeResult([], False), None
 
-                await random_human_delay_seconds()
                 try:
-                    await page.wait_for_timeout(int(settings.post_nav_wait_ms))
+                    await page.wait_for_selector(
+                        "div[data-testid='JobCard'], div.job-card, [class*='JobCard']",
+                        timeout=8000,
+                    )
                 except Exception:
-                    pass
+                    await asyncio.sleep(5)
                 await light_human_gesture(page)
 
                 if await _page_looks_blocked(page):
-                    return ListingScrapeResult([], True)
+                    return ListingScrapeResult([], True), None
 
                 for sel_try in [
                     "main",
@@ -289,32 +409,29 @@ async def _scrape_listing_jobs_once(
                         reason="zero_results",
                     )
                     logger.warning("Zero jobs extracted. See %s and %s", img_f, html_f)
-
-            finally:
-                try:
-                    await page.close()
-                except Exception:
-                    pass
+            except Exception:
+                return ListingScrapeResult([], False), selector_used
+        except Exception:
+            return ListingScrapeResult([], False), selector_used
 
     return ListingScrapeResult(results[:cap], blocked_hit), selector_used
 
 
 async def scrape_listing_jobs(criteria: SearchRequest) -> ListingScrapeResult:
     try:
-        res, selector_used = await _scrape_listing_jobs_once(criteria, headless_override=None)
-        # Headed fallback for local diagnosis when headless extraction is empty.
-        if not res.rows and settings.playwright_headless:
-            logger.warning("Headless returned zero jobs — retrying headed fallback")
-            res2, selector2 = await _scrape_listing_jobs_once(criteria, headless_override=False)
-            if res2.rows:
-                res = res2
-                selector_used = selector2
+        res, selector_used = await _scrape_listing_jobs_once(criteria)
         scraper_health.last_run_at = datetime.utcnow().isoformat()
         scraper_health.last_query = f"{criteria.title} | {criteria.location}"
         scraper_health.cards_found = len(res.rows)
         scraper_health.selector_used = selector_used or ""
         scraper_health.blocked = bool(res.blocked_or_restricted)
         scraper_health.error = "blocked_or_empty" if (res.blocked_or_restricted and not res.rows) else ""
+        _append_selector_history(
+            query=scraper_health.last_query,
+            selector=selector_used,
+            cards_found=len(res.rows),
+            blocked=bool(res.blocked_or_restricted),
+        )
         return res
     except Exception as exc:  # noqa: BLE001
         scraper_health.last_run_at = datetime.utcnow().isoformat()
@@ -323,6 +440,12 @@ async def scrape_listing_jobs(criteria: SearchRequest) -> ListingScrapeResult:
         scraper_health.selector_used = ""
         scraper_health.blocked = False
         scraper_health.error = str(exc)[:500]
+        _append_selector_history(
+            query=scraper_health.last_query,
+            selector=None,
+            cards_found=0,
+            blocked=False,
+        )
         raise
 
 
@@ -337,6 +460,7 @@ async def _extract_from_current_page(
     cards = cards_match.cards
 
     if cards:
+        cards = cards[:cap]
         for card in cards:
             if len(results) >= cap:
                 break
@@ -412,65 +536,181 @@ async def scrape_job_detail(job_url: str) -> dict[str, str | None]:
 async def scrape_job_detail_safe(job_url: str) -> dict[str, str | None]:
     title: str | None = None
     description: str | None = None
-
+    mapped: dict[str, str] = {}
     if not job_url:
         return {"title": None, "description_text": None}
 
-    async with async_playwright() as p:
-        async with monster_browser_context(p) as context:
-            page = None
+    async with monster_browser_context() as (_browser, _context, page):
+        try:
+            page.set_default_timeout(45_000)
+            await page.goto(job_url, wait_until="domcontentloaded", timeout=30_000)
             try:
-                try:
-                    page = await context.new_page()
-                    page.set_default_timeout(45_000)
-                    await page.goto(job_url, wait_until="domcontentloaded")
-                    try:
-                        await page.wait_for_timeout(int(settings.post_nav_wait_ms))
-                    except Exception:
-                        pass
-                    await random_human_delay_seconds()
+                await page.wait_for_load_state("networkidle", timeout=10_000)
+            except Exception:
+                pass
+            try:
+                await page.wait_for_selector(
+                    ", ".join(DETAIL_SELECTORS["description"]),
+                    timeout=10_000,
+                )
+            except Exception:
+                await save_debug_snapshot(page, job_url, "detail_no_description")
+                logger.warning("Description not found on detail page: %s", job_url)
+            await asyncio.sleep(2)
+            try:
+                await page.wait_for_timeout(int(settings.post_nav_wait_ms))
+            except Exception:
+                pass
+            await random_human_delay_seconds()
 
-                    if await _page_looks_blocked(page):
-                        return {"title": None, "description_text": None}
+            if await _page_looks_blocked(page):
+                return {"title": None, "description_text": None}
 
-                    for css in sel.DETAIL_TITLE_SELECTORS:
-                        try:
-                            el = await page.query_selector(css)
-                            if el:
-                                t = (await el.inner_text()).strip()
-                                if t and len(t) < 500:
-                                    title = t
-                                    break
-                        except Exception:
-                            continue
+            title = await _first_inner_text(page, page, sel.DETAIL_TITLE_SELECTORS)
+            facts = await page.evaluate(
+                """
+                () => {
+                    const result = {};
+                    document.querySelectorAll('dl').forEach((dl) => {
+                        const dts = dl.querySelectorAll('dt');
+                        const dds = dl.querySelectorAll('dd');
+                        dts.forEach((dt, i) => {
+                            const label = (dt.innerText || '').trim().toLowerCase();
+                            const value = (dds[i]?.innerText || '').trim();
+                            if (label && value) result[label] = value;
+                        });
+                    });
+                    return result;
+                }
+                """
+            )
 
-                    for css in sel.DETAIL_CONTAINER_SELECTORS:
-                        try:
-                            el = await page.query_selector(css)
-                            if el:
-                                text = (await el.inner_text()).strip()
-                                if text and len(text) > 80:
-                                    description = text[: settings.max_description_chars]
-                                    break
-                        except Exception:
-                            continue
+            def get_fact(d: dict[str, str], *keys: str) -> str:
+                for k in keys:
+                    for dk, dv in d.items():
+                        if dk.lower().strip() == k.lower() and dv and dv.strip() and dv.strip() != "—":
+                            return dv.strip()
+                return ""
 
-                    if not description:
-                        try:
-                            body = await page.query_selector("body")
-                            if body:
-                                description = (
-                                    await body.inner_text()
-                                ).strip()[: settings.max_description_chars]
-                        except Exception:
-                            description = None
-                except Exception:
-                    pass
-            finally:
-                if page:
-                    try:
-                        await page.close()
-                    except Exception:
-                        pass
+            mapped = {
+                "location": await extract_with_fallback(page, DETAIL_SELECTORS["location"]),
+                "job_type": await extract_with_fallback(page, DETAIL_SELECTORS["job_type"]) or get_fact(facts, "job type", "jobtype"),
+                "industry": await extract_with_fallback(page, DETAIL_SELECTORS["industry"]) or get_fact(facts, "industry"),
+                "salary": await extract_with_fallback(page, DETAIL_SELECTORS["salary"]) or get_fact(facts, "salary", "salary range"),
+                "company_size": await extract_with_fallback(page, DETAIL_SELECTORS["company_size"]) or get_fact(facts, "company size"),
+                "year_founded": await extract_with_fallback(page, DETAIL_SELECTORS["year_founded"]) or get_fact(facts, "year founded"),
+                "website": await _extract_href_with_fallback(page, DETAIL_SELECTORS["website"]) or get_fact(facts, "website"),
+                "about_company": await extract_with_fallback(page, DETAIL_SELECTORS["company_about"]),
+                "description": await extract_with_fallback(page, DETAIL_SELECTORS["description"]),
+            }
+            for field_name, value in mapped.items():
+                if value:
+                    logger.info("Extracted %s from detail: %s", field_name, value[:80])
+                else:
+                    logger.warning("Could not extract %s from %s", field_name, job_url)
+            description = (mapped["description"] or "")[: settings.max_description_chars]
+        except Exception:
+            pass
 
-    return {"title": title, "description_text": description}
+    return {
+        "title": title,
+        "description_text": description,
+        "location": mapped.get("location"),
+        "job_type": mapped.get("job_type"),
+        "industry": mapped.get("industry"),
+        "salary": mapped.get("salary"),
+        "company_size": mapped.get("company_size"),
+        "year_founded": mapped.get("year_founded"),
+        "website": mapped.get("website"),
+        "about_company": mapped.get("about_company"),
+    }
+
+
+def map_detail_to_job(raw: dict[str, str]) -> dict[str, str]:
+    return {
+        "location": raw.get("location", ""),
+        "job_type": raw.get("job_type", ""),
+        "industry": raw.get("industry", ""),
+        "salary": raw.get("salary", ""),
+        "company_size": raw.get("company_size", ""),
+        "year_founded": raw.get("year_founded", ""),
+        "website": raw.get("website", ""),
+        "description": raw.get("description", ""),
+        "about_company": raw.get("company_about", ""),
+    }
+
+
+async def test_selector_on_url(selector: str, url: str) -> dict[str, object]:
+    selector = (selector or "").strip()
+    if not selector:
+        raise ValueError("selector is required")
+    if not (url or "").strip():
+        raise ValueError("url is required")
+    if not url.startswith("https://www.monster.com/jobs"):
+        raise ValueError("url must start with https://www.monster.com/jobs")
+    async with monster_browser_context() as (_browser, _context, page):
+        page.set_default_timeout(45_000)
+        await page.goto(url, wait_until="domcontentloaded")
+        try:
+            await page.wait_for_selector(
+                "div[data-testid='JobCard'], div.job-card, [class*='JobCard']",
+                timeout=8000,
+            )
+        except Exception:
+            await asyncio.sleep(5)
+        await page.wait_for_timeout(4000)
+        matched = len(await page.query_selector_all(selector))
+        html_f, _ = await save_debug_snapshot(page, query=f"test|{selector}|{url}", reason="selector_test")
+        page_title = await page.title()
+        return {"matched": matched, "page_title": page_title, "snapshot_saved": html_f}
+
+
+async def discover_detail_selectors(url: str) -> dict[str, object]:
+    if not (url or "").startswith("https://www.monster.com/job"):
+        raise ValueError("url must be a Monster job detail URL")
+    async with monster_browser_context() as (_browser, _context, page):
+        page.set_default_timeout(45_000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        await page.wait_for_timeout(4000)
+        elements = await page.evaluate(
+            """
+            () => {
+                const out = [];
+                document.querySelectorAll('[data-testid]').forEach((el) => {
+                    const text = (el.innerText || '').trim();
+                    if (text && text.length < 500) {
+                        out.push({
+                            selector: `[data-testid="${el.getAttribute('data-testid')}"]`,
+                            text: text.slice(0, 200),
+                            tag: (el.tagName || '').toLowerCase(),
+                        });
+                    }
+                });
+                const keywords = [
+                    'location', 'industry', 'company', 'size',
+                    'founded', 'website', 'description', 'about',
+                    'jobtype', 'job-type', 'salary', 'benefit'
+                ];
+                document.querySelectorAll('*').forEach((el) => {
+                    const cls = (el.className || '').toString().toLowerCase();
+                    const id = (el.id || '').toLowerCase();
+                    const text = (el.innerText || '').trim();
+                    if (!text || text.length > 500 || text.length < 2) return;
+                    keywords.forEach((kw) => {
+                        if (cls.includes(kw) || id.includes(kw)) {
+                            const firstClass = ((el.className || '').toString().split(' ')[0] || '').trim();
+                            out.push({
+                                selector: el.id ? `#${el.id}` : (firstClass ? `.${firstClass}` : el.tagName.toLowerCase()),
+                                text: text.slice(0, 200),
+                                tag: (el.tagName || '').toLowerCase(),
+                                matched_keyword: kw,
+                            });
+                        }
+                    });
+                });
+                return out;
+            }
+            """
+        )
+        title = await page.title()
+        return {"url": url, "page_title": title, "elements_found": len(elements), "elements": elements}

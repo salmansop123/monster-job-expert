@@ -1,5 +1,21 @@
 # Monster Job Expert
 
+## Required: Connect your real Chrome before running searches
+
+This scraper does NOT launch its own browser.
+You must start Chrome with remote debugging enabled:
+
+```bash
+google-chrome --remote-debugging-port=9222 \
+  --user-data-dir=/tmp/chrome-monster-profile
+```
+
+Then browse to monster.com in that window.
+Then set `USE_CDP_CHROME=true` in `.env`.
+Then start the backend.
+
+The scraper will control your Chrome silently — no new window will open.
+
 Full-stack app: **Playwright** scrapes Monster.com listings and job pages; **OpenAI** extracts structured fields like summary, description, Numbers & Facts (location, job type, industry, company size, year founded, website), and About Company. The UI uses a simple search form (job title, location/remote, latest-job count) and a dashboard.
 
 ## Prerequisites

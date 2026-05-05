@@ -25,7 +25,6 @@ class Settings(BaseSettings):
     """Legacy base delay; scrape min/max derive from this when unset."""
     scrape_delay_min_ms: int | None = Field(default=None)
     scrape_delay_max_ms: int | None = Field(default=None)
-    playwright_headless: bool = True
     playwright_slow_mo_ms: int = 0
     playwright_visual_scroll_debug: bool = False
     """If set and the file exists, Playwright loads this storage state (cookies/session)."""
@@ -54,6 +53,9 @@ class Settings(BaseSettings):
     """Comma-separated backoff delays before retry 1, retry 2, ..."""
     playwright_user_data_dir: str = ""
     """If set, use persistent Chromium profile (cookies/session) at this path."""
+    chrome_cdp_url: str = "http://localhost:9222"
+    chrome_user_data_dir: str = "/tmp/chrome-monster-profile"
+    use_cdp_chrome: bool = True
 
     enable_openai: bool = True
     """If true, batch ingestion calls OpenAI for each job; keep false to avoid request bursts."""

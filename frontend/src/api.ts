@@ -33,6 +33,12 @@ export interface JobRecord {
   source: string;
   relevance_score?: number | null;
   description_text?: string | null;
+  job_type?: string | null;
+  industry?: string | null;
+  company_size?: string | null;
+  year_founded?: string | null;
+  website?: string | null;
+  about_company?: string | null;
   enrichment: JobEnrichment | null;
   openai_model?: string | null;
 }
@@ -41,7 +47,69 @@ export interface IngestMetadata {
   response_status: string;
   ingest_status?: string | null;
   feed_last_updated?: string | null;
+  scraped_at?: string | null;
   message?: string | null;
+}
+
+export interface ScraperHealth {
+  last_run_at: string;
+  last_query: string;
+  cards_found: number;
+  selector_used: string;
+  blocked: boolean;
+  error: string;
+  cookie_age_hours?: number | null;
+  browser_mode?: "cdp" | "disabled";
+}
+
+export interface SelectorHistoryEntry {
+  ts: string;
+  query: string;
+  selector: string;
+  cards_found: number;
+  blocked: boolean;
+}
+
+export interface ChromeStatus {
+  connected: boolean;
+  browser?: string;
+  user_agent?: string;
+  binary?: string;
+  binary_found?: string;
+  os?: "linux" | "darwin" | "windows" | string;
+  cdp_url?: string;
+  error?: string;
+  hint?: string;
+}
+
+export interface ScrapeProgress {
+  stage: string;
+  current: number;
+  total: number;
+  message: string;
+}
+
+export interface SearchHistoryEntry {
+  id: number;
+  title: string;
+  location: string;
+  num_jobs: number;
+  result_count: number;
+  created_at: string;
+}
+
+
+export interface LiveJobDetail {
+  title?: string | null;
+  description_text?: string | null;
+  location?: string | null;
+  job_type?: string | null;
+  industry?: string | null;
+  salary?: string | null;
+  company_size?: string | null;
+  year_founded?: string | null;
+  website?: string | null;
+  about_company?: string | null;
 }
 
 export interface SearchStatusResponse {
@@ -62,7 +130,7 @@ export interface JobListResponse {
 }
 
 export async function postSearch(body: SearchRequest): Promise<{ search_id: number }> {
-  const res = await fetch("/api/v1/search", {
+  const res = await fetch("/api/v1/search?force_refresh=true", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -73,8 +141,57 @@ export async function postSearch(body: SearchRequest): Promise<{ search_id: numb
   return res.json();
 }
 
+export async function getScraperHealth(): Promise<ScraperHealth> {
+  const res = await fetch("/api/scraper/health");
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function listDebugSnapshots(): Promise<string[]> {
+  const res = await fetch("/debug/snapshots");
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getSelectorHistory(): Promise<SelectorHistoryEntry[]> {
+  const res = await fetch("/api/scraper/selector-history");
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function testSelector(body: {
+  selector: string;
+  url: string;
+}): Promise<{ matched: number; page_title: string; snapshot_saved: string }> {
+  const res = await fetch("/api/scraper/test-selector", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getChromeStatus(): Promise<ChromeStatus> {
+  const res = await fetch("/api/scraper/chrome-status");
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function launchChrome(): Promise<{ status: string; error?: string }> {
+  const res = await fetch("/api/scraper/launch-chrome", { method: "POST" });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function getSearch(searchId: number): Promise<SearchStatusResponse> {
   const res = await fetch(`/api/v1/search/${searchId}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getSearchHistory(): Promise<SearchHistoryEntry[]> {
+  const res = await fetch("/api/search/history");
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -102,4 +219,15 @@ export async function enrichJob(jobId: number, searchId?: number): Promise<JobRe
   const res = await fetch(url, { method: "POST" });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
+}
+
+export async function scrapeJobDetailLive(url: string): Promise<LiveJobDetail> {
+  const res = await fetch("/api/scraper/job-detail", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  return (data?.detail ?? {}) as LiveJobDetail;
 }
