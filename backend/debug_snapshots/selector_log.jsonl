@@ -12,3 +12,5 @@
 {"ts": "2026-05-05T17:03:45.315258", "query": "AI | remote", "selector": "[class*='JobCard']", "cards_found": 6, "blocked": false}
 {"ts": "2026-05-05T17:07:46.218341", "query": "AI | remote", "selector": "[class*='JobCard']", "cards_found": 6, "blocked": false}
 {"ts": "2026-05-05T17:16:20.122697", "query": "AI | remote", "selector": "[class*='JobCard']", "cards_found": 15, "blocked": false}
+{"ts": "2026-05-05T17:28:16.199194", "query": "AI | remote", "selector": "", "cards_found": 0, "blocked": false}
+{"ts": "2026-05-05T17:29:00.189692", "query": "AI | remote", "selector": "[class*='JobCard']", "cards_found": 5, "blocked": false}
